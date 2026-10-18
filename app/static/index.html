@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CareGraph Sentinel</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--ink:#14202b;--mute:#5d6b78;--line:#e1e5ea;--brand:#0b6e6e;--brand-ink:#fff;
+        --bad:#c0392b;--warn:#d98a00;--ok:#1d7a46;--chip:#eef3f3}
+  @media (prefers-color-scheme:dark){:root{--bg:#10161c;--card:#18212a;--ink:#e8eef3;--mute:#93a1ad;--line:#2a3541;
+        --brand:#3fb6b0;--brand-ink:#08201f;--bad:#ff7a6b;--warn:#f0b34a;--ok:#5fcf8f;--chip:#1f2b35}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  header{padding:18px 20px 6px;max-width:1100px;margin:0 auto}
+  h1{font-size:20px;margin:0}
+  header p{margin:2px 0 0;color:var(--mute);font-size:13px}
+  main{max-width:1100px;margin:0 auto;padding:10px 20px 40px;display:grid;gap:14px;grid-template-columns:1fr}
+  @media (min-width:900px){main{grid-template-columns:1.05fr .95fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  input[type=text]{flex:1;min-width:200px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
+  select{padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
+  button{padding:10px 16px;border:0;border-radius:8px;background:var(--brand);color:var(--brand-ink);font:inherit;font-weight:600;cursor:pointer}
+  button:disabled{opacity:.6;cursor:wait}
+  .chip{background:var(--chip);color:var(--ink);border:1px solid var(--line);font-weight:400;font-size:13px;padding:5px 10px;border-radius:999px}
+  .label{font-size:12px;color:var(--mute);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 6px}
+  .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid var(--line)}
+  .b-answered_with_path,.b-answered_from_memory{color:var(--ok)} .b-not_in_graph,.b-need_system{color:var(--warn)} .b-unknown_system{color:var(--bad)}
+  .answer{font-size:16px;margin:8px 0}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mute);font-weight:500}
+  .path{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+  .sev5{color:var(--bad);font-weight:600}.sev4{color:var(--warn);font-weight:600}
+  svg{width:100%;height:auto;display:block}
+  .legend{font-size:12px;color:var(--mute);display:flex;gap:14px;flex-wrap:wrap;margin-top:4px}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:middle}
+  .note{color:var(--mute);font-size:12.5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>CareGraph Sentinel</h1>
+  <p>HL7 interface incident agent. Every answer is a graph traversal, and the path is shown. Synthetic data only.</p>
+</header>
+<main>
+  <section class="card">
+    <div class="row">
+      <select id="tenant" title="Each hospital is its own isolated graph"></select>
+      <input id="q" type="text" placeholder="e.g. The LIS interface is down, what breaks?" autocomplete="off">
+      <button id="go">Ask</button>
+    </div>
+    <div class="row" id="chips" style="margin-top:10px"></div>
+    <div id="result"></div>
+  </section>
+  <section class="card">
+    <div class="label" style="margin-top:0">Integration graph</div>
+    <svg id="graph" viewBox="0 0 520 440" role="img" aria-label="Integration graph"></svg>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--warn)"></span>failing</span>
+      <span><span class="dot" style="background:var(--bad)"></span>affected / on path</span>
+      <span><span class="dot" style="background:var(--mute)"></span>unaffected</span>
+    </div>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const session = Math.random().toString(36).slice(2, 10);
+const EXAMPLES = [
+  "The LIS interface is down, what breaks?",
+  "lab-lis is down, direct dependencies only",
+  "Why is registration connected to patient-portal?",
+  "Who should I page if ehr-core fails?",
+  "What changed recently around hie-gateway?",
+  "What do we know about lab-lis?",
+  "Which systems are the biggest hubs?",
+  "payments-api is down",
+];
+let G = {systems: [], feeds: []}, pos = {}, hl = {source: null, affected: [], edges: []};
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function init() {
+  const t = await (await fetch('/api/tenants')).json();
+  $('#tenant').innerHTML = t.tenants.map(x => `<option>${x}</option>`).join('');
+  if (t.tenants.includes('stmary')) $('#tenant').value = 'stmary';
+  $('#chips').innerHTML = EXAMPLES.map(e => `<button class="chip">${esc(e)}</button>`).join('');
+  document.querySelectorAll('.chip').forEach(b => b.onclick = () => { $('#q').value = b.textContent; ask(); });
+  $('#go').onclick = ask;
+  $('#q').onkeydown = e => { if (e.key === 'Enter') ask(); };
+  $('#tenant').onchange = () => { loadGraph(); $('#result').innerHTML = ''; };
+  loadGraph();
+}
+
+async function loadGraph() {
+  G = await (await fetch('/api/graph?tenant=' + $('#tenant').value)).json();
+  hl = {source: null, affected: [], edges: []};
+  const n = G.systems.length, cx = 260, cy = 220, r = 165;
+  G.systems.forEach((s, i) => {
+    const a = (i / n) * 2 * Math.PI - Math.PI / 2;
+    pos[s.name] = [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+  });
+  draw();
+}
+
+function draw() {
+  const edgeKey = (a, b) => a + '>' + b;
+  const hot = new Set(hl.edges.map(e => edgeKey(e[0], e[1])));
+  let svg = `<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker></defs>`;
+  const seen = new Set();
+  G.feeds.forEach(f => {
+    const [x1, y1] = pos[f.source], [x2, y2] = pos[f.target];
+    const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
+    const off = seen.has(f.target + '>' + f.source) ? 7 : 0; seen.add(edgeKey(f.source, f.target));
+    const nx = -dy / len * off, ny = dx / len * off;
+    const sx = x1 + dx / len * 22 + nx, sy = y1 + dy / len * 22 + ny, ex = x2 - dx / len * 24 + nx, ey = y2 - dy / len * 24 + ny;
+    const h = hot.has(edgeKey(f.source, f.target));
+    svg += `<line x1="${sx}" y1="${sy}" x2="${ex}" y2="${ey}" stroke="${h ? 'var(--bad)' : 'var(--line)'}" stroke-width="${h ? 2.4 : 1.2}" marker-end="url(#ar)"><title>${esc(f.interface)} (${esc(f.msg)})</title></line>`;
+  });
+  G.systems.forEach(s => {
+    const [x, y] = pos[s.name];
+    const fill = s.name === hl.source ? 'var(--warn)' : hl.affected.includes(s.name) ? 'var(--bad)' : 'var(--mute)';
+    svg += `<circle cx="${x}" cy="${y}" r="17" fill="${fill}" opacity="${hl.source || hl.affected.length ? (fill === 'var(--mute)' ? .45 : 1) : .85}"><title>${esc(s.kind)}</title></circle>`;
+    const anchor = x < 200 ? 'end' : x > 320 ? 'start' : 'middle';
+    const lx = x + (anchor === 'end' ? -22 : anchor === 'start' ? 22 : 0), ly = y + (anchor === 'middle' ? (y < 220 ? -24 : 32) : 4);
+    svg += `<text x="${lx}" y="${ly}" text-anchor="${anchor}" font-size="11.5" fill="currentColor">${esc(s.name)}</text>`;
+  });
+  $('#graph').innerHTML = svg;
+}
+
+async function ask() {
+  const q = $('#q').value.trim(); if (!q) return;
+  $('#go').disabled = true; $('#result').innerHTML = '<p class="note">Walking the graph...</p>';
+  try {
+    const r = await fetch('/api/ask', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tenant: $('#tenant').value, question: q, session})});
+    const d = await r.json(); if (!r.ok) throw new Error(d.detail || 'request failed');
+    hl = d.highlight || hl; draw(); render(d);
+  } catch (e) { $('#result').innerHTML = `<p class="note">Error: ${esc(e.message)}</p>`; }
+  $('#go').disabled = false;
+}
+
+function render(d) {
+  const s = d.sections || {};
+  let h = `<div class="row" style="margin-top:12px"><span class="badge b-${d.outcome}">${d.outcome.replaceAll('_', ' ')}</span>
+    <span class="note">mode: ${esc(d.mode)}${d.memory_written ? ' · finding saved to memory' : ''}</span></div>
+    <p class="answer">${esc(d.answer)}</p>`;
+  if (s.downstream_impact && s.downstream_impact.systems.length) {
+    h += `<div class="label">Impact path (hops walked)</div><table><tr><th>System</th><th>Hops</th><th>Route</th></tr>` +
+      s.downstream_impact.systems.map(x => `<tr><td>${esc(x.system)}</td><td>${x.hops}</td><td class="path">${x.via.map(esc).join(' → ')}</td></tr>`).join('') + `</table>`;
+  }
+  if (s.path_between && s.path_between.found) {
+    const p = s.path_between;
+    h += `<div class="label">Shortest path (algo.SPpaths)</div><div class="path">${p.hops.map(esc).join(' → ')}</div><div class="note">${p.interfaces.map(esc).join(', ')}</div>`;
+  }
+  if (s.affected_workflows && s.affected_workflows.workflows.length) {
+    h += `<div class="label">Clinical workflows at risk · ${esc(s.affected_workflows.priority)}</div><table>` +
+      s.affected_workflows.workflows.map(w => `<tr><td>${esc(w.workflow)}</td><td class="sev${w.severity}">sev ${w.severity}</td></tr>`).join('') + `</table>`;
+  }
+  if (s.who_to_page) {
+    h += `<div class="label">Who to page</div><table>` + s.who_to_page.teams.map(t =>
+      `<tr><td>${esc(t.team)}</td><td>${esc(t.oncall || 'no one on call')}</td><td class="note">${t.systems.map(esc).join(', ')}</td></tr>`).join('') + `</table>`;
+  }
+  if (s.recent_changes && s.recent_changes.changes.length) {
+    h += `<div class="label">Recent changes</div><table>` + s.recent_changes.changes.map(c =>
+      `<tr><td>${esc(c.id)}</td><td>${esc(c.system)}</td><td>${c.hours_ago}h ago</td><td>${esc(c.summary)}</td></tr>`).join('') + `</table>`;
+  }
+  if (s.critical_systems) {
+    h += `<div class="label">PageRank hubs</div><table>` + s.critical_systems.systems.map(c =>
+      `<tr><td>${esc(c.system)}</td><td class="note">${esc(c.kind)}</td><td>${c.score}</td></tr>`).join('') + `</table>`;
+  }
+  if (s.recall && s.recall.findings.length) {
+    h += `<div class="label">Memory</div><table>` + s.recall.findings.map(f =>
+      `<tr><td>${f.days_ago < 1 ? 'today' : Math.round(f.days_ago) + 'd ago'}</td><td>${esc(f.text)}</td></tr>`).join('') + `</table>`;
+  }
+  h += `<div class="label">Tool trace</div><table><tr><th>Tool</th><th>Arguments</th><th>ms</th><th>rows</th></tr>` +
+    d.trace.map(t => `<tr><td>${esc(t.tool)}</td><td class="path">${esc(JSON.stringify(t.args))}${t.error ? '<br><span class="sev5">' + esc(t.error) + '</span>' : ''}</td><td>${t.ms}</td><td>${t.rows}</td></tr>`).join('') + `</table>`;
+  if (d.guard) h += `<p class="note">Wording guard: ${esc(d.guard.ok ? 'passed' : d.guard.reason)} (${esc(d.guard.source)})</p>`;
+  $('#result').innerHTML = h;
+}
+init();
+</script>
+</body>
+</html>

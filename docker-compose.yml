@@ -1,0 +1,23 @@
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6379:6379"   # database
+      - "3000:3000"   # FalkorDB Browser: inspect the graph visually
+    volumes:
+      - falkordb-data:/var/lib/falkordb/data
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      # optional: LLM tool selection + wording. Works without it (rule router).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      - falkordb
+
+volumes:
+  falkordb-data:
